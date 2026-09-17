@@ -1,0 +1,67 @@
+name: Deploy
+
+# Manual or tag-triggered.  Requires the infra to be applied once and the
+# repository secret AWS_ROLE_ARN set to the `github_actions_role_arn` output.
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  id-token: write   # OIDC token for AssumeRoleWithWebIdentity
+  contents: read
+
+env:
+  AWS_REGION: ap-northeast-2
+  PROJECT: spring-aws-starter
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assume deploy role via OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        id: build
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          TAG="${GITHUB_SHA::7}"
+          IMAGE="$REGISTRY/$PROJECT"
+          docker build --build-arg APP_VERSION="$TAG" -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
+          docker push "$IMAGE:$TAG"
+          docker push "$IMAGE:latest"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Point instances at the new tag
+        run: |
+          aws ssm put-parameter --name "/$PROJECT/app/image_tag" --type String \
+            --value "${{ steps.build.outputs.tag }}" --overwrite
+
+      - name: Rolling instance refresh
+        run: |
+          ID=$(aws autoscaling start-instance-refresh --auto-scaling-group-name "$PROJECT-asg" \
+                --preferences '{"MinHealthyPercentage":50,"InstanceWarmup":90}' \
+                --query InstanceRefreshId --output text)
+          echo "refresh id: $ID"
+          for i in $(seq 1 40); do
+            STATUS=$(aws autoscaling describe-instance-refreshes --auto-scaling-group-name "$PROJECT-asg" \
+                      --instance-refresh-ids "$ID" --query 'InstanceRefreshes[0].Status' --output text)
+            echo "$STATUS"
+            case "$STATUS" in
+              Successful) exit 0 ;;
+              Failed|Cancelled|RollbackSuccessful|RollbackFailed) exit 1 ;;
+            esac
+            sleep 30
+          done
+          echo "timed out waiting for instance refresh"; exit 1

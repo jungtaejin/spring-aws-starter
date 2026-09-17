@@ -1,0 +1,6 @@
+# Copy to terraform.tfvars (git-ignored) and fill in.
+region        = "ap-northeast-2"
+project_name  = "spring-aws-starter"
+instance_type = "t3.micro"
+db_password   = "change-me-to-a-long-random-string"
+github_repo   = "jungtaejin/spring-aws-starter"
